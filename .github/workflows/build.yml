@@ -8,18 +8,72 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
-      - run: flutter create --org com.distortionlabs --project-name distortion_labs_iptv --platforms=android .
-      - run: python3 tool/patch_android.py
+
+      - name: Generar proyecto Android
+        run: flutter create --org com.distortionlabs --project-name distortion_labs_iptv --platforms=android .
+
+      - name: Parchar Android
+        run: |
+          python3 - <<'EOF'
+          import re, pathlib
+          root = pathlib.Path('android/app')
+
+          for name in ('build.gradle', 'build.gradle.kts'):
+              f = root / name
+              if f.exists():
+                  s = f.read_text()
+                  s = re.sub(r'minSdk(Version)?(\s*=\s*|\s+)flutter\.minSdkVersion', 'minSdk = 23', s)
+                  f.write_text(s)
+
+          m = root / 'src/main/AndroidManifest.xml'
+          s = m.read_text()
+          if 'xmlns:tools' not in s:
+              s = s.replace('<manifest ', '<manifest xmlns:tools="http://schemas.android.com/tools" ', 1)
+          if 'FOREGROUND_SERVICE_MEDIA_PLAYBACK' not in s:
+              perms = ''.join(
+                  '    <uses-permission android:name="android.permission.%s"/>\n' % p
+                  for p in ['INTERNET', 'WAKE_LOCK', 'FOREGROUND_SERVICE',
+                            'FOREGROUND_SERVICE_MEDIA_PLAYBACK', 'POST_NOTIFICATIONS'])
+              s = s.replace('<application', perms + '    <application', 1)
+              s = s.replace('<application', '<application android:usesCleartextTraffic="true"', 1)
+          if 'AudioService' not in s:
+              block = '''
+              <service android:name="com.ryanheise.audioservice.AudioService"
+                  android:foregroundServiceType="mediaPlayback"
+                  android:exported="true" tools:ignore="Instantiatable">
+                  <intent-filter><action android:name="android.media.browse.MediaBrowserService"/></intent-filter>
+              </service>
+              <receiver android:name="com.ryanheise.audioservice.MediaButtonReceiver"
+                  android:exported="true" tools:ignore="Instantiatable">
+                  <intent-filter><action android:name="android.intent.action.MEDIA_BUTTON"/></intent-filter>
+              </receiver>
+          </application>'''
+              s = s.replace('</application>', block, 1)
+          m.write_text(s)
+
+          for f in (root / 'src/main').rglob('MainActivity.*'):
+              if f.suffix == '.kt':
+                  pkg = re.search(r'package\s+([\w.]+)', f.read_text()).group(1)
+                  f.write_text(
+                      'package %s\n\nimport com.ryanheise.audioservice.AudioServiceActivity\n\nclass MainActivity : AudioServiceActivity()\n' % pkg)
+          print('Android parcheado OK')
+          EOF
+
       - run: flutter pub get
-      - run: flutter build apk --release
+
+      - name: Compilar APK
+        run: flutter build apk --release
+
       - uses: actions/upload-artifact@v4
         with:
           name: distortion-labs-iptv-apk
